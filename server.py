@@ -38,69 +38,26 @@ DB_PATH = os.path.join(os.getcwd(), "secondary_brain.db")
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS recordings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_file_id TEXT,
-            transcript TEXT,
-            summary TEXT,
-            action_items TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS clipboard (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            content_type TEXT,
-            category TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS telemetry (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            step_count INTEGER,
-            location_name TEXT,
-            wifi_ssid TEXT,
-            focus_minutes INTEGER,
-            battery_level INTEGER,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            amount REAL,
-            category TEXT,
-            merchant TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS recordings (id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_file_id TEXT, transcript TEXT, summary TEXT, action_items TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, content_type TEXT, category TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, step_count INTEGER, location_name TEXT, wifi_ssid TEXT, focus_minutes INTEGER, battery_level INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, merchant TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# Keep-alive endpoint to prevent Render free-tier sleep
 @app.get("/")
 def health_check():
     return {
-        "status": "Encore OS Server Hardened & Online 🚀",
+        "status": "Encore OS Server Online 🚀",
         "active_api_keys": len(GROQ_KEYS),
         "keep_alive": "Active"
     }
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"🧠 *Encore OS Hardened Secondary Brain Online*\n\n"
-        f"🔑 *Active Groq Keys*: {len(GROQ_KEYS)}\n"
-        f"⚡ Multi-Key Failover & Full Transcript Handling Enabled.\n\n"
-        f"Commands:\n"
-        f"• */recent* - View recent indexed recordings (0 AI tokens)\n"
-        f"• */stats* - View daily telemetry (0 AI tokens)",
-        parse_mode="Markdown"
-    )
+    msg = "🧠 *Encore OS Secondary Brain Online*\n\n⚡ Multi-Key Failover & Full Transcript Handling Enabled.\n\nCommands:\n• */recent* - View recent indexed recordings\n• */stats* - View daily telemetry"
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
@@ -108,37 +65,30 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT id, summary, created_at FROM recordings ORDER BY id DESC LIMIT 3")
     rows = c.fetchall()
     conn.close()
-    
     if not rows:
         await update.message.reply_text("📭 No recordings indexed yet.")
         return
-        
-    msg = "📝 *Recent Recordings (0 AI Tokens Used)*:\n\n"
+    msg = "📝 *Recent Recordings*:\n\n"
     for r in rows:
-        msg += f"• *ID #{r[0]}* ({r[2]}):\n{r[1][:150]}...\n\n"
+        summary_preview = r[1][:150] if r[1] else "No summary"
+        msg += f"• *ID #{r[0]}* ({r[2]}):\n{summary_preview}...\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     audio_file = message.audio or message.voice or message.document
-    
     if not audio_file:
         return
-
     if hasattr(audio_file, 'file_size') and audio_file.file_size and audio_file.file_size < 5000:
         await message.reply_text("⚠️ Skipping empty audio snippet (<5KB) to save API quota.")
         return
-
     status_msg = await message.reply_text("📥 *Receiving recording...*", parse_mode="Markdown")
-    
     try:
         file = await context.bot.get_file(audio_file.file_id)
         with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp_file:
             await file.download_to_drive(tmp_file.name)
             tmp_path = tmp_file.name
-
         await status_msg.edit_text("⚡ *Minimal Whisper Turbo Transcription...*", parse_mode="Markdown")
-
         transcription = None
         for attempt in range(len(GROQ_KEYS) or 1):
             try:
@@ -151,26 +101,14 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed ({err})")
-
+                logger.warning(f"Key attempt {attempt+1} failed: {err}")
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
         if not transcription:
             raise Exception("All Groq API keys exhausted or rate-limited.")
-
-        await status_msg.edit_text("🧠 *Generating Full AI Summary...*", parse_mode="Markdown")
-
-        # Hardened Fix: Up to 8,000 characters of transcript (covers full 1-hour lectures)
-        compact_prompt = f"""Analyze the transcript below and provide:
-1. Core Topic Title
-2. 3 Key Bullet Point Summaries
-3. Main Action Items or Key Formulas/Quotes mentioned
-
---- TRANSCRIPT ---
-{transcription[:8000]}
---- END ---"""
-
+        await status_msg.edit_text("🧠 *Generating AI Summary...*", parse_mode="Markdown")
+        snippet_text = transcription[:8000]
+        compact_prompt = f"Analyze transcript:\n{snippet_text}\n\nExtract 3 brief bullet points and main action items."
         ai_summary = None
         for attempt in range(len(GROQ_KEYS) or 1):
             try:
@@ -184,24 +122,17 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ai_summary = completion.choices[0].message.content
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed for completion ({err})")
-
+                logger.warning(f"Key attempt {attempt+1} failed for completion: {err}")
         if not ai_summary:
-            ai_summary = f"Summary unavailable. Full transcript indexed below."
-
+            ai_summary = "Summary unavailable. Full transcript indexed below."
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO recordings (telegram_file_id, transcript, summary, action_items) VALUES (?, ?, ?, ?)",
-            (audio_file.file_id, transcription, ai_summary, "")
-        )
+        c.execute("INSERT INTO recordings (telegram_file_id, transcript, summary, action_items) VALUES (?, ?, ?, ?)", (audio_file.file_id, transcription, ai_summary, ""))
         conn.commit()
         conn.close()
-
-        full_response = f"✅ *Indexed in Secondary Brain DB*\n\n{ai_summary}\n\n---
-📝 *Transcript Snippet*:\n_{transcription[:400]}..._"
+        preview = transcription[:400]
+        full_response = f"✅ *Indexed in Secondary Brain DB*\n\n{ai_summary}\n\n---\n📝 *Transcript Snippet*:\n_{preview}..._"
         await status_msg.edit_text(full_response, parse_mode="Markdown")
-
     except Exception as e:
         logger.error(f"Error processing audio: {e}")
         await status_msg.edit_text(f"❌ *Error processing recording*: {str(e)}", parse_mode="Markdown")
@@ -211,11 +142,10 @@ async def run_bot():
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("recent", recent_command))
     bot_app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_audio))
-    
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Hardened Telegram Bot polling started successfully.")
+    logger.info("Telegram Bot polling started successfully.")
 
 @app.on_event("startup")
 async def startup_event():
