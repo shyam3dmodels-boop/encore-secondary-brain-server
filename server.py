@@ -5,6 +5,7 @@ import asyncio
 import tempfile
 import sqlite3
 import json
+import itertools
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,18 +16,25 @@ from fastapi import FastAPI
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+# Parse single or multiple comma-separated Groq API keys
+raw_keys = os.environ.get("GROQ_API_KEYS") or os.environ.get("GROQ_API_KEY") or ""
+GROQ_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-if not GROQ_API_KEY or not TELEGRAM_BOT_TOKEN:
-    logger.error("Missing GROQ_API_KEY or TELEGRAM_BOT_TOKEN in environment variables!")
+if not GROQ_KEYS or not TELEGRAM_BOT_TOKEN:
+    logger.error("Missing GROQ_API_KEY(S) or TELEGRAM_BOT_TOKEN in environment variables!")
 
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# Create a round-robin cycle of Groq Clients
+key_cycle = itertools.cycle(GROQ_KEYS) if GROQ_KEYS else None
+
+def get_groq_client():
+    if not key_cycle:
+        return None
+    key = next(key_cycle)
+    return Groq(api_key=key)
+
 app = FastAPI()
 
-# ------------------------------------------------------------------------------
-# DATABASE INITIALIZATION (SQLite Storage)
-# ------------------------------------------------------------------------------
 DB_PATH = os.path.join(os.getcwd(), "secondary_brain.db")
 
 def init_db():
@@ -78,24 +86,24 @@ init_db()
 
 @app.get("/")
 def health_check():
-    return {"status": "Encore OS Ultra-Frugal AI Server is Online 🚀"}
+    return {
+        "status": "Encore OS Server Online 🚀",
+        "active_api_keys": len(GROQ_KEYS),
+        "multi_key_rotation": "Enabled" if len(GROQ_KEYS) > 1 else "Single Key Active"
+    }
 
-# 0 AI API Calls for Command Responses (Loaded from Local Database)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 *Encore OS Minimal AI Secondary Brain Online*\n\n"
-        "⚡ *Frugal AI Optimizations Active*:\n"
-        "• Direct DB lookups (0 API tokens used for searches)\n"
-        "• Whisper Turbo fast audio transcription\n"
-        "• Compact 3-bullet AI summaries (90% token savings)\n\n"
-        "Commands:\n"
-        "• */recent* - View recent indexed recordings (0 AI tokens)\n"
-        "• */stats* - View daily telemetry (0 AI tokens)",
+        f"🧠 *Encore OS Multi-Key Secondary Brain Online*\n\n"
+        f"🔑 *Active Groq Keys*: {len(GROQ_KEYS)}\n"
+        f"⚡ Automatic Key Rotation & Failover Enabled.\n\n"
+        f"Commands:\n"
+        f"• */recent* - View recent indexed recordings (0 AI tokens)\n"
+        f"• */stats* - View daily telemetry (0 AI tokens)",
         parse_mode="Markdown"
     )
 
 async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Retrieve directly from local SQLite database (0 AI tokens used)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id, summary, created_at FROM recordings ORDER BY id DESC LIMIT 3")
@@ -111,7 +119,6 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• *ID #{r[0]}* ({r[2]}):\n{r[1][:150]}...\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# Ultra-Frugal Audio Processing Pipeline
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     audio_file = message.audio or message.voice or message.document
@@ -119,7 +126,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not audio_file:
         return
 
-    # Skip files smaller than 5 KB (prevents wasting API quota on empty noise)
     if hasattr(audio_file, 'file_size') and audio_file.file_size and audio_file.file_size < 5000:
         await message.reply_text("⚠️ Skipping empty audio snippet (<5KB) to save API quota.")
         return
@@ -134,32 +140,51 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text("⚡ *Minimal Whisper Turbo Transcription...*", parse_mode="Markdown")
 
-        # 1. Fast Whisper Large V3 Turbo (Lowest Compute)
-        with open(tmp_path, "rb") as file_obj:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(tmp_path, file_obj.read()),
-                model="whisper-large-v3-turbo",
-                response_format="text"
-            )
+        # Key Failover Execution for Transcription
+        transcription = None
+        for attempt in range(len(GROQ_KEYS) or 1):
+            try:
+                client = get_groq_client()
+                with open(tmp_path, "rb") as file_obj:
+                    transcription = client.audio.transcriptions.create(
+                        file=(tmp_path, file_obj.read()),
+                        model="whisper-large-v3-turbo",
+                        response_format="text"
+                    )
+                break
+            except Exception as err:
+                logger.warning(f"Key attempt {attempt+1} failed, trying next key... ({err})")
 
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-        await status_msg.edit_text("🧠 *Compact AI Summarization (Ultra-Frugal)...*", parse_mode="Markdown")
+        if not transcription:
+            raise Exception("All Groq API keys exhausted or rate-limited.")
 
-        # 2. Compact Prompt Template with Strict Max Token Cap (300 tokens max)
+        await status_msg.edit_text("🧠 *Compact AI Summarization...*", parse_mode="Markdown")
+
         compact_prompt = f"""Summarize this audio transcript into exactly 3 brief bullet points:
 
 {transcription[:2000]}"""
 
-        completion = groq_client.chat.completions.create(
-            model="qwen/qwen3.8-27b",
-            messages=[{"role": "user", "content": compact_prompt}],
-            temperature=0.2,
-            max_tokens=300 # Strict cap saves 85%+ output token quota
-        )
+        # Key Failover Execution for Summarization
+        ai_summary = None
+        for attempt in range(len(GROQ_KEYS) or 1):
+            try:
+                client = get_groq_client()
+                completion = client.chat.completions.create(
+                    model="qwen/qwen3.8-27b",
+                    messages=[{"role": "user", "content": compact_prompt}],
+                    temperature=0.2,
+                    max_tokens=300
+                )
+                ai_summary = completion.choices[0].message.content
+                break
+            except Exception as err:
+                logger.warning(f"Key attempt {attempt+1} failed for completion... ({err})")
 
-        ai_summary = completion.choices[0].message.content
+        if not ai_summary:
+            ai_summary = f"Summary unavailable (Rate limited). Full transcript preserved below."
 
         # Save to Database
         conn = sqlite3.connect(DB_PATH)
@@ -171,7 +196,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        full_response = f"✅ *Indexed in Database (Ultra-Frugal Tokens)*\n\n{ai_summary}\n\n---\n📝 *Transcript*:\n_{transcription[:300]}..._"
+        full_response = f"✅ *Indexed in Database (Multi-Key Active)*\n\n{ai_summary}\n\n---
+📝 *Transcript*:\n_{transcription[:300]}..._"
         await status_msg.edit_text(full_response, parse_mode="Markdown")
 
     except Exception as e:
@@ -187,7 +213,7 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Frugal Telegram Bot polling started successfully.")
+    logger.info("Multi-Key Telegram Bot polling started successfully.")
 
 @app.on_event("startup")
 async def startup_event():
