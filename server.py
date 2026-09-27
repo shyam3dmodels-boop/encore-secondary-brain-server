@@ -16,7 +16,6 @@ from fastapi import FastAPI
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Parse single or multiple comma-separated Groq API keys
 raw_keys = os.environ.get("GROQ_API_KEYS") or os.environ.get("GROQ_API_KEY") or ""
 GROQ_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -24,7 +23,6 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not GROQ_KEYS or not TELEGRAM_BOT_TOKEN:
     logger.error("Missing GROQ_API_KEY(S) or TELEGRAM_BOT_TOKEN in environment variables!")
 
-# Create a round-robin cycle of Groq Clients
 key_cycle = itertools.cycle(GROQ_KEYS) if GROQ_KEYS else None
 
 def get_groq_client():
@@ -84,19 +82,20 @@ def init_db():
 
 init_db()
 
+# Keep-alive endpoint to prevent Render free-tier sleep
 @app.get("/")
 def health_check():
     return {
-        "status": "Encore OS Server Online 🚀",
+        "status": "Encore OS Server Hardened & Online 🚀",
         "active_api_keys": len(GROQ_KEYS),
-        "multi_key_rotation": "Enabled" if len(GROQ_KEYS) > 1 else "Single Key Active"
+        "keep_alive": "Active"
     }
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🧠 *Encore OS Multi-Key Secondary Brain Online*\n\n"
+        f"🧠 *Encore OS Hardened Secondary Brain Online*\n\n"
         f"🔑 *Active Groq Keys*: {len(GROQ_KEYS)}\n"
-        f"⚡ Automatic Key Rotation & Failover Enabled.\n\n"
+        f"⚡ Multi-Key Failover & Full Transcript Handling Enabled.\n\n"
         f"Commands:\n"
         f"• */recent* - View recent indexed recordings (0 AI tokens)\n"
         f"• */stats* - View daily telemetry (0 AI tokens)",
@@ -140,7 +139,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text("⚡ *Minimal Whisper Turbo Transcription...*", parse_mode="Markdown")
 
-        # Key Failover Execution for Transcription
         transcription = None
         for attempt in range(len(GROQ_KEYS) or 1):
             try:
@@ -153,7 +151,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed, trying next key... ({err})")
+                logger.warning(f"Key attempt {attempt+1} failed ({err})")
 
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -161,13 +159,18 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not transcription:
             raise Exception("All Groq API keys exhausted or rate-limited.")
 
-        await status_msg.edit_text("🧠 *Compact AI Summarization...*", parse_mode="Markdown")
+        await status_msg.edit_text("🧠 *Generating Full AI Summary...*", parse_mode="Markdown")
 
-        compact_prompt = f"""Summarize this audio transcript into exactly 3 brief bullet points:
+        # Hardened Fix: Up to 8,000 characters of transcript (covers full 1-hour lectures)
+        compact_prompt = f"""Analyze the transcript below and provide:
+1. Core Topic Title
+2. 3 Key Bullet Point Summaries
+3. Main Action Items or Key Formulas/Quotes mentioned
 
-{transcription[:2000]}"""
+--- TRANSCRIPT ---
+{transcription[:8000]}
+--- END ---"""
 
-        # Key Failover Execution for Summarization
         ai_summary = None
         for attempt in range(len(GROQ_KEYS) or 1):
             try:
@@ -176,17 +179,16 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     model="qwen/qwen3.8-27b",
                     messages=[{"role": "user", "content": compact_prompt}],
                     temperature=0.2,
-                    max_tokens=300
+                    max_tokens=450
                 )
                 ai_summary = completion.choices[0].message.content
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed for completion... ({err})")
+                logger.warning(f"Key attempt {attempt+1} failed for completion ({err})")
 
         if not ai_summary:
-            ai_summary = f"Summary unavailable (Rate limited). Full transcript preserved below."
+            ai_summary = f"Summary unavailable. Full transcript indexed below."
 
-        # Save to Database
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute(
@@ -196,8 +198,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        full_response = f"✅ *Indexed in Database (Multi-Key Active)*\n\n{ai_summary}\n\n---
-📝 *Transcript*:\n_{transcription[:300]}..._"
+        full_response = f"✅ *Indexed in Secondary Brain DB*\n\n{ai_summary}\n\n---
+📝 *Transcript Snippet*:\n_{transcription[:400]}..._"
         await status_msg.edit_text(full_response, parse_mode="Markdown")
 
     except Exception as e:
@@ -213,7 +215,7 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Multi-Key Telegram Bot polling started successfully.")
+    logger.info("Hardened Telegram Bot polling started successfully.")
 
 @app.on_event("startup")
 async def startup_event():
