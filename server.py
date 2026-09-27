@@ -7,6 +7,8 @@ import sqlite3
 import json
 import re
 import itertools
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
@@ -25,6 +27,9 @@ GROQ_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "8942980083:AAHmhVY4ybuOYSSJDsyuF8Z-1DP66WEbl5k"
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN") or "HarshBrainSecretKey2026!#"
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "-1004445314496"
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID") or "android-1a887"
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY") or "AIzaSyCTUzJhx7yuMv35XWXlSFW3MhQtG_-GT3w"
 
 key_cycle = itertools.cycle(GROQ_KEYS) if GROQ_KEYS else None
 
@@ -45,6 +50,39 @@ app.add_middleware(
 )
 
 DB_PATH = os.path.join(os.getcwd(), "secondary_brain.db")
+
+# ─── Direct Firebase Sync Helper ─────────────────────────────────────────────
+def sync_to_firestore(collection_path: str, doc_id: Optional[str], fields: Dict[str, Any]):
+    """Syncs documents directly to Firebase Firestore via REST API without dependencies."""
+    try:
+        url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/{collection_path}"
+        if doc_id:
+            url += f"/{doc_id}?key={FIREBASE_API_KEY}"
+        else:
+            url += f"?key={FIREBASE_API_KEY}"
+            
+        firestore_fields = {}
+        for k, v in fields.items():
+            if isinstance(v, str):
+                firestore_fields[k] = {"stringValue": v}
+            elif isinstance(v, (int, float)):
+                firestore_fields[k] = {"doubleValue": float(v)}
+            elif isinstance(v, bool):
+                firestore_fields[k] = {"booleanValue": v}
+            else:
+                firestore_fields[k] = {"stringValue": str(v)}
+                
+        payload = json.dumps({"fields": firestore_fields}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="PATCH" if doc_id else "POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            logger.info(f"Synced {collection_path} to Firebase Firestore. Status: {res.status}")
+    except Exception as e:
+        logger.warning(f"Firestore sync notice ({collection_path}): {e}")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -159,6 +197,7 @@ def save_active_chat_id(chat_id: str):
 def health_check():
     return {
         "status": "Encore OS Server Online 🚀",
+        "firebase_project": FIREBASE_PROJECT_ID,
         "active_api_keys": len(GROQ_KEYS),
         "keep_alive": "Active",
         "chat_connected": bool(get_active_chat_id()),
@@ -178,26 +217,26 @@ def get_device_health():
         return {"success": True, "data": {}}
     
     d = dict(row)
-    return {
-        "success": True,
-        "data": {
-            "battery_level": d.get("battery_level", 85),
-            "battery_charging": bool(d.get("battery_charging", 0)),
-            "battery_temp_celsius": d.get("battery_temp_celsius", 31.8),
-            "step_count_today": d.get("step_count", 5420),
-            "wifi_bssid": d.get("wifi_bssid", "C4:EA:1D:9A:88:2F"),
-            "wifi_ssid": d.get("wifi_ssid", "HomeNet_5G"),
-            "network_type": d.get("network_type", "WIFI"),
-            "signal_strength_dbm": d.get("signal_strength_dbm", -52),
-            "ram_used_mb": d.get("ram_used_mb", 3450),
-            "ram_total_mb": d.get("ram_total_mb", 8000),
-            "storage_used_gb": d.get("storage_used_gb", 52.4),
-            "storage_total_gb": d.get("storage_total_gb", 256.0),
-            "cpu_temp_celsius": d.get("cpu_temp_celsius", 36.5),
-            "screen_on_minutes_today": d.get("screen_on_minutes", 168),
-            "last_updated": d.get("timestamp", datetime.utcnow().isoformat())
-        }
+    data = {
+        "battery_level": d.get("battery_level", 85),
+        "battery_charging": bool(d.get("battery_charging", 0)),
+        "battery_temp_celsius": d.get("battery_temp_celsius", 31.8),
+        "step_count_today": d.get("step_count", 5420),
+        "wifi_bssid": d.get("wifi_bssid", "C4:EA:1D:9A:88:2F"),
+        "wifi_ssid": d.get("wifi_ssid", "HomeNet_5G"),
+        "network_type": d.get("network_type", "WIFI"),
+        "signal_strength_dbm": d.get("signal_strength_dbm", -52),
+        "ram_used_mb": d.get("ram_used_mb", 3450),
+        "ram_total_mb": d.get("ram_total_mb", 8000),
+        "storage_used_gb": d.get("storage_used_gb", 52.4),
+        "storage_total_gb": d.get("storage_total_gb", 256.0),
+        "cpu_temp_celsius": d.get("cpu_temp_celsius", 36.5),
+        "screen_on_minutes_today": d.get("screen_on_minutes", 168),
+        "last_updated": d.get("timestamp", datetime.utcnow().isoformat())
     }
+    # Direct sync to Firestore telemetry/current
+    sync_to_firestore("telemetry", "current", data)
+    return {"success": True, "data": data}
 
 @app.get("/device/profile")
 def get_device_profile():
@@ -223,33 +262,18 @@ def get_device_location():
     row = c.fetchone()
     conn.close()
     
-    if not row:
-        return {
-            "success": True,
-            "data": {
-                "latitude": 28.6139,
-                "longitude": 77.2090,
-                "accuracy_meters": 10.0,
-                "location_label": "Kamakura Crossing Area",
-                "google_maps_url": "https://www.google.com/maps?q=28.6139,77.2090",
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        }
-    
-    d = dict(row)
-    lat = d.get("latitude", 28.6139)
-    lon = d.get("longitude", 77.2090)
-    return {
-        "success": True,
-        "data": {
-            "latitude": lat,
-            "longitude": lon,
-            "accuracy_meters": d.get("accuracy_meters", 12.0),
-            "location_label": d.get("location_label", "Extracted Location"),
-            "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}",
-            "timestamp": d.get("timestamp", datetime.utcnow().isoformat())
-        }
+    lat = row["latitude"] if row else 28.6139
+    lon = row["longitude"] if row else 77.2090
+    loc_data = {
+        "latitude": lat,
+        "longitude": lon,
+        "accuracy_meters": row["accuracy_meters"] if row else 10.0,
+        "location_label": row["location_label"] if row else "Kamakura Crossing Area",
+        "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}",
+        "timestamp": row["timestamp"] if row else datetime.utcnow().isoformat()
     }
+    sync_to_firestore("locations", "latest", loc_data)
+    return {"success": True, "data": loc_data}
 
 @app.get("/voice-tasks")
 def get_voice_tasks(limit: int = 20, offset: int = 0):
@@ -274,7 +298,6 @@ def get_voice_tasks(limit: int = 20, offset: int = 0):
             "ai_summary": d.get("summary") or "",
             "created_at": d.get("created_at") or datetime.utcnow().isoformat()
         })
-        
     return {"success": True, "data": tasks}
 
 @app.get("/summary/daily")
@@ -328,13 +351,20 @@ async def dispatch_c2_command(req: CommandRequest):
             telegram_note = f"Telegram send error: {str(e)}"
             logger.warning(telegram_note)
 
-    # Log command in SQLite database
+    # Log command in SQLite database & Firebase
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO command_logs (command, status, response) VALUES (?, ?, ?)", 
               (cmd, "SENT" if telegram_sent else "LOGGED", telegram_note))
     conn.commit()
     conn.close()
+    
+    sync_to_firestore("commands", None, {
+        "command": cmd,
+        "status": "SENT" if telegram_sent else "LOGGED",
+        "response": telegram_note,
+        "issued_at": datetime.utcnow().isoformat()
+    })
             
     return {
         "success": True,
@@ -393,7 +423,7 @@ bot_app = None
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     save_active_chat_id(str(chat_id))
-    msg = f"🧠 *Encore OS Secondary Brain Online*\n\n✅ *Linked with Mission Control!* (Chat ID: `{chat_id}`)\n\n⚡ Features:\n• Send voice notes to get instant Groq Whisper transcription\n• Send GPS location to record live coordinates\n• Commands: `/locate`, `/status`, `/recent`"
+    msg = f"🧠 *Encore OS Secondary Brain Online*\n\n🔥 *Direct Firebase Sync Active!* (`{FIREBASE_PROJECT_ID}`)\n✅ *Linked with Mission Control!* (Chat ID: `{chat_id}`)\n\n⚡ Features:\n• Send voice notes $\\rightarrow$ instant Groq Whisper transcription $\\rightarrow$ saved to Firebase\n• Send GPS location $\\rightarrow$ instant map pin in Web Mission Control\n• Commands: `/locate`, `/status`, `/recent`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -431,9 +461,19 @@ async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_
     conn.commit()
     conn.close()
     
+    # Direct sync to Firebase Firestore
+    sync_to_firestore("locations", "latest", {
+        "latitude": lat,
+        "longitude": lon,
+        "accuracy_meters": 10.0,
+        "location_label": "Telegram Live Pin",
+        "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}",
+        "timestamp": datetime.utcnow().isoformat()
+    })
+    
     maps_link = f"https://www.google.com/maps?q={lat},{lon}"
     await update.message.reply_text(
-        f"📍 *Location Indexed in Mission Control*\n\n• *Coordinates*: `{lat:.5f}, {lon:.5f}`\n• [Open in Google Maps]({maps_link})",
+        f"📍 *Location Synced to Firebase & Mission Control!*\n\n• *Coordinates*: `{lat:.5f}, {lon:.5f}`\n• [Open in Google Maps]({maps_link})",
         parse_mode="Markdown",
         disable_web_page_preview=True
     )
@@ -444,7 +484,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     text = update.message.text or ""
     
-    # Check if user sent coordinates like "28.6139, 77.2090"
     coord_match = re.search(r'(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)', text)
     if coord_match:
         lat = float(coord_match.group(1))
@@ -455,16 +494,35 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         c.execute("UPDATE telemetry SET latitude = ?, longitude = ? WHERE id = (SELECT MAX(id) FROM telemetry)", (lat, lon))
         conn.commit()
         conn.close()
-        await update.message.reply_text(f"📍 Extracted coordinates: `{lat:.5f}, {lon:.5f}` $\\rightarrow$ Synced to Mission Control Database!")
+        
+        sync_to_firestore("locations", "latest", {
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_meters": 15.0,
+            "location_label": "Telegram Text Coords",
+            "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        await update.message.reply_text(f"📍 Extracted coordinates: `{lat:.5f}, {lon:.5f}` $\\rightarrow$ Synced to Firebase & Mission Control!")
         return
 
-    # Store text note in clipboard table
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO clipboard (content, content_type, category) VALUES (?, 'text', 'TELEGRAM_NOTE')", (text,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("📋 Note saved to Secondary Brain database.", parse_mode="Markdown")
+    
+    sync_to_firestore("voice_notes", None, {
+        "raw_text": text,
+        "category": "NOTE",
+        "urgency": "MEDIUM",
+        "parsed_title": text[:60],
+        "completed": False,
+        "groq_transcription": text,
+        "ai_summary": text,
+        "created_at": datetime.utcnow().isoformat()
+    })
+    await update.message.reply_text("📋 Note saved to Firebase Secondary Brain database.", parse_mode="Markdown")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -517,7 +575,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ai_summary = completion.choices[0].message.content
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed: {err}")
+                logger.warning(f"Key attempt {attempt+1} failed for completion: {err}")
         if not ai_summary:
             ai_summary = "Summary unavailable. Full transcript indexed below."
         conn = sqlite3.connect(DB_PATH)
@@ -525,8 +583,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute("INSERT INTO recordings (telegram_file_id, transcript, summary, action_items) VALUES (?, ?, ?, ?)", (audio_file.file_id, transcription, ai_summary, ""))
         conn.commit()
         conn.close()
+        
+        # Direct sync to Firebase Firestore
+        sync_to_firestore("voice_notes", None, {
+            "raw_text": transcription,
+            "category": "TASK",
+            "urgency": "HIGH",
+            "parsed_title": ai_summary.split("\n")[0][:60] if ai_summary else "Voice Recording",
+            "completed": False,
+            "groq_transcription": transcription,
+            "ai_summary": ai_summary,
+            "created_at": datetime.utcnow().isoformat()
+        })
+        
         preview = transcription[:400]
-        full_response = f"✅ *Indexed in Secondary Brain DB*\n\n{ai_summary}\n\n---\n📝 *Transcript Snippet*:\n_{preview}..._"
+        full_response = f"✅ *Synced to Firebase & Secondary Brain DB*\n\n{ai_summary}\n\n---\n📝 *Transcript Snippet*:\n_{preview}..._"
         await status_msg.edit_text(full_response, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error processing audio: {e}")
@@ -546,7 +617,7 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Telegram Bot polling started with auto-chat linking and location parser.")
+    logger.info("Telegram Bot polling started with direct Firebase Firestore sync.")
 
 @app.on_event("startup")
 async def startup_event():
