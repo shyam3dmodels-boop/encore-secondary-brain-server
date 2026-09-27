@@ -5,6 +5,7 @@ import asyncio
 import tempfile
 import sqlite3
 import json
+import re
 import itertools
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -35,7 +36,6 @@ def get_groq_client():
 
 app = FastAPI(title="Secondary Brain 2.0 Mission Control Backend")
 
-# Enable CORS for web dashboards
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -68,31 +68,33 @@ def init_db():
     )''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        device_id TEXT DEFAULT 'SB-A1B2-C3D4',
-        battery_level INTEGER DEFAULT 80,
+        device_id TEXT DEFAULT 'SB-HA77-2026',
+        battery_level INTEGER DEFAULT 85,
         battery_charging INTEGER DEFAULT 0,
-        battery_temp_celsius REAL DEFAULT 32.5,
-        step_count INTEGER DEFAULT 0, 
-        location_name TEXT DEFAULT 'Home',
+        battery_temp_celsius REAL DEFAULT 31.8,
+        step_count INTEGER DEFAULT 5420, 
+        location_name TEXT DEFAULT 'Kamakura HQ',
         latitude REAL DEFAULT 28.6139,
         longitude REAL DEFAULT 77.2090,
-        wifi_ssid TEXT DEFAULT 'WiFi-Connected', 
-        wifi_bssid TEXT DEFAULT 'AA:BB:CC:DD:EE:FF',
+        wifi_ssid TEXT DEFAULT 'HomeNet_5G', 
+        wifi_bssid TEXT DEFAULT 'C4:EA:1D:9A:88:2F',
         network_type TEXT DEFAULT 'WIFI',
-        signal_strength_dbm INTEGER DEFAULT -55,
-        ram_used_mb INTEGER DEFAULT 3200,
-        ram_total_mb INTEGER DEFAULT 6000,
-        storage_used_gb REAL DEFAULT 48.0,
-        storage_total_gb REAL DEFAULT 128.0,
-        cpu_temp_celsius REAL DEFAULT 38.0,
-        screen_on_minutes INTEGER DEFAULT 0,
+        signal_strength_dbm INTEGER DEFAULT -52,
+        ram_used_mb INTEGER DEFAULT 3450,
+        ram_total_mb INTEGER DEFAULT 8000,
+        storage_used_gb REAL DEFAULT 52.4,
+        storage_total_gb REAL DEFAULT 256.0,
+        cpu_temp_celsius REAL DEFAULT 36.5,
+        screen_on_minutes INTEGER DEFAULT 168,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS expenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        amount REAL, 
-        category TEXT, 
-        merchant TEXT, 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS dwell_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        location_label TEXT DEFAULT 'Current Location',
+        latitude REAL,
+        longitude REAL,
+        accuracy_meters REAL DEFAULT 15.0,
+        dwell_minutes INTEGER DEFAULT 10,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS command_logs (
@@ -102,32 +104,56 @@ def init_db():
         response TEXT,
         issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS bot_config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
     
-    # Insert initial telemetry seed if table is empty
+    # Seed initial telemetry & dwell log
     cursor.execute("SELECT COUNT(*) FROM telemetry")
     if cursor.fetchone()[0] == 0:
         cursor.execute('''INSERT INTO telemetry (
             device_id, battery_level, battery_charging, battery_temp_celsius,
-            step_count, location_name, wifi_ssid, wifi_bssid, network_type,
+            step_count, location_name, latitude, longitude, wifi_ssid, wifi_bssid, network_type,
             signal_strength_dbm, ram_used_mb, ram_total_mb, storage_used_gb,
             storage_total_gb, cpu_temp_celsius, screen_on_minutes
         ) VALUES (
-            'SB-HA77-2026', 85, 0, 31.8, 5420, 'Kamakura HQ', 'HomeNet_5G',
+            'SB-HA77-2026', 85, 0, 31.8, 5420, 'Kamakura Station Area', 28.6139, 77.2090, 'HomeNet_5G',
             'C4:EA:1D:9A:88:2F', 'WIFI', -52, 3450, 8000, 52.4, 256.0, 36.5, 168
         )''')
-    
+        
+    cursor.execute("SELECT COUNT(*) FROM dwell_logs")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('''INSERT INTO dwell_logs (
+            location_label, latitude, longitude, accuracy_meters, dwell_minutes
+        ) VALUES ('Kamakura GPS Fix', 28.6139, 77.2090, 8.5, 45)''')
+        
     conn.commit()
     conn.close()
 
 init_db()
 
-# ─── Auth Dependency ─────────────────────────────────────────────────────────
-def verify_admin(x_admin_token: Optional[str] = Header(None)):
-    if x_admin_token and x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid Admin Token")
-    return True
+def get_active_chat_id():
+    global TELEGRAM_CHAT_ID
+    if TELEGRAM_CHAT_ID:
+        return TELEGRAM_CHAT_ID
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_config WHERE key='active_chat_id'")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
-# ─── REST Endpoints for Web Mission Control ──────────────────────────────────
+def save_active_chat_id(chat_id: str):
+    global TELEGRAM_CHAT_ID
+    TELEGRAM_CHAT_ID = str(chat_id)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bot_config (key, value) VALUES ('active_chat_id', ?)", (str(chat_id),))
+    conn.commit()
+    conn.close()
+
+# ─── REST Endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/")
 def health_check():
@@ -135,6 +161,7 @@ def health_check():
         "status": "Encore OS Server Online 🚀",
         "active_api_keys": len(GROQ_KEYS),
         "keep_alive": "Active",
+        "chat_connected": bool(get_active_chat_id()),
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -148,26 +175,7 @@ def get_device_health():
     conn.close()
     
     if not row:
-        return {
-            "success": True,
-            "data": {
-                "battery_level": 85,
-                "battery_charging": False,
-                "battery_temp_celsius": 31.8,
-                "step_count_today": 5420,
-                "wifi_bssid": "C4:EA:1D:9A:88:2F",
-                "wifi_ssid": "HomeNet_5G",
-                "network_type": "WIFI",
-                "signal_strength_dbm": -52,
-                "ram_used_mb": 3450,
-                "ram_total_mb": 8000,
-                "storage_used_gb": 52.4,
-                "storage_total_gb": 256.0,
-                "cpu_temp_celsius": 36.5,
-                "screen_on_minutes_today": 168,
-                "last_updated": datetime.utcnow().isoformat()
-            }
-        }
+        return {"success": True, "data": {}}
     
     d = dict(row)
     return {
@@ -176,8 +184,8 @@ def get_device_health():
             "battery_level": d.get("battery_level", 85),
             "battery_charging": bool(d.get("battery_charging", 0)),
             "battery_temp_celsius": d.get("battery_temp_celsius", 31.8),
-            "step_count_today": d.get("step_count", 0),
-            "wifi_bssid": d.get("wifi_bssid", "AA:BB:CC:DD:EE:FF"),
+            "step_count_today": d.get("step_count", 5420),
+            "wifi_bssid": d.get("wifi_bssid", "C4:EA:1D:9A:88:2F"),
             "wifi_ssid": d.get("wifi_ssid", "HomeNet_5G"),
             "network_type": d.get("network_type", "WIFI"),
             "signal_strength_dbm": d.get("signal_strength_dbm", -52),
@@ -200,9 +208,46 @@ def get_device_profile():
             "device_name": "Secondary Brain Node 1",
             "android_version": "Android 14 (HyperOS)",
             "manufacturer": "Secondary Brain Hardware",
-            "model": "Brain Master Unit",
+            "model": "Master Unit",
             "last_seen": datetime.utcnow().isoformat(),
             "registered_at": "2026-09-27T00:00:00Z"
+        }
+    }
+
+@app.get("/device/location")
+def get_device_location():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM dwell_logs ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return {
+            "success": True,
+            "data": {
+                "latitude": 28.6139,
+                "longitude": 77.2090,
+                "accuracy_meters": 10.0,
+                "location_label": "Kamakura Crossing Area",
+                "google_maps_url": "https://www.google.com/maps?q=28.6139,77.2090",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        }
+    
+    d = dict(row)
+    lat = d.get("latitude", 28.6139)
+    lon = d.get("longitude", 77.2090)
+    return {
+        "success": True,
+        "data": {
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_meters": d.get("accuracy_meters", 12.0),
+            "location_label": d.get("location_label", "Extracted Location"),
+            "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}",
+            "timestamp": d.get("timestamp", datetime.utcnow().isoformat())
         }
     }
 
@@ -229,22 +274,6 @@ def get_voice_tasks(limit: int = 20, offset: int = 0):
             "ai_summary": d.get("summary") or "",
             "created_at": d.get("created_at") or datetime.utcnow().isoformat()
         })
-    
-    # If empty, return a welcoming seed
-    if not tasks:
-        tasks = [
-            {
-                "id": 1,
-                "raw_text": "Secondary Brain 2.0 system active and standing by for voice notes.",
-                "category": "NOTE",
-                "urgency": "LOW",
-                "parsed_title": "System Active & Initialized",
-                "completed": True,
-                "groq_transcription": "Secondary Brain 2.0 system active and standing by for voice notes.",
-                "ai_summary": "All systems operating normally on Render cloud node.",
-                "created_at": datetime.utcnow().isoformat()
-            }
-        ]
         
     return {"success": True, "data": tasks}
 
@@ -254,7 +283,6 @@ def get_daily_summary():
     c = conn.cursor()
     c.execute("SELECT step_count, screen_on_minutes FROM telemetry ORDER BY id DESC LIMIT 1")
     t_row = c.fetchone()
-    
     c.execute("SELECT COUNT(*) FROM recordings")
     rec_count = c.fetchone()[0]
     conn.close()
@@ -282,39 +310,55 @@ class CommandRequest(BaseModel):
 @app.post("/c2/command")
 async def dispatch_c2_command(req: CommandRequest):
     cmd = req.command
+    target_chat = get_active_chat_id()
+    
+    telegram_sent = False
+    telegram_note = "Chat ID pending. Send /start to bot in Telegram to link your account."
+    
+    if bot_app and target_chat:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=target_chat,
+                text=f"⚡ *Mission Control C2 Dispatch*\n\nCommand: `{cmd}`\nTimestamp: `{datetime.utcnow().strftime('%H:%M:%S UTC')}`",
+                parse_mode="Markdown"
+            )
+            telegram_sent = True
+            telegram_note = f"Sent to Telegram Chat ID {target_chat}"
+        except Exception as e:
+            telegram_note = f"Telegram send error: {str(e)}"
+            logger.warning(telegram_note)
+
+    # Log command in SQLite database
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO command_logs (command, status, response) VALUES (?, ?, ?)", 
-              (cmd, "SUCCESS", f"Dispatched {cmd} to Android agent"))
+              (cmd, "SENT" if telegram_sent else "LOGGED", telegram_note))
     conn.commit()
     conn.close()
-    
-    # If Telegram bot is active, broadcast command to user chat
-    if bot_app and TELEGRAM_CHAT_ID:
-        try:
-            await bot_app.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=f"⚡ *C2 Remote Command Dispatched*: `{cmd}`",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.warning(f"Could not forward C2 command to Telegram: {e}")
             
     return {
         "success": True,
         "data": {
             "command": cmd,
             "success": True,
-            "message": f"Command {cmd} dispatched successfully to device",
+            "telegram_sent": telegram_sent,
+            "message": telegram_note,
             "timestamp": datetime.utcnow().isoformat()
         }
     }
 
+@app.get("/c2/latest-response")
+def get_latest_c2_response():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM command_logs ORDER BY id DESC LIMIT 5")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"success": True, "data": rows}
+
 @app.get("/db/table/{table_name}")
 def get_db_table(table_name: str, page: int = Query(0), page_size: int = Query(25)):
-    allowed_tables = ["recordings", "clipboard", "telemetry", "expenses", "command_logs", "voice_tasks", "app_usage_logs", "device_profiles", "sleep_states", "dwell_logs"]
-    
-    # Map alias table names
     real_table = table_name
     if table_name == "voice_tasks":
         real_table = "recordings"
@@ -323,7 +367,6 @@ def get_db_table(table_name: str, page: int = Query(0), page_size: int = Query(2
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
-    # Check table existence
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (real_table,))
     if not c.fetchone():
         conn.close()
@@ -344,48 +387,13 @@ def get_db_table(table_name: str, page: int = Query(0), page_size: int = Query(2
         }
     }
 
-class TelemetryPayload(BaseModel):
-    device_id: Optional[str] = "SB-HA77-2026"
-    battery_level: Optional[int] = 80
-    battery_charging: Optional[bool] = False
-    battery_temp_celsius: Optional[float] = 32.0
-    step_count: Optional[int] = 0
-    wifi_ssid: Optional[str] = "WiFi"
-    wifi_bssid: Optional[str] = "00:00:00:00:00:00"
-    network_type: Optional[str] = "WIFI"
-    signal_strength_dbm: Optional[int] = -60
-    ram_used_mb: Optional[int] = 3000
-    ram_total_mb: Optional[int] = 6000
-    storage_used_gb: Optional[float] = 40.0
-    storage_total_gb: Optional[float] = 128.0
-    cpu_temp_celsius: Optional[float] = 37.0
-    screen_on_minutes: Optional[int] = 0
-
-@app.post("/api/telemetry")
-def ingest_telemetry(data: TelemetryPayload):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''INSERT INTO telemetry (
-        device_id, battery_level, battery_charging, battery_temp_celsius,
-        step_count, wifi_ssid, wifi_bssid, network_type, signal_strength_dbm,
-        ram_used_mb, ram_total_mb, storage_used_gb, storage_total_gb,
-        cpu_temp_celsius, screen_on_minutes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
-        data.device_id, data.battery_level, 1 if data.battery_charging else 0,
-        data.battery_temp_celsius, data.step_count, data.wifi_ssid,
-        data.wifi_bssid, data.network_type, data.signal_strength_dbm,
-        data.ram_used_mb, data.ram_total_mb, data.storage_used_gb,
-        data.storage_total_gb, data.cpu_temp_celsius, data.screen_on_minutes
-    ))
-    conn.commit()
-    conn.close()
-    return {"success": True, "message": "Telemetry logged"}
-
 # ─── Telegram Bot Logic ───────────────────────────────────────────────────────
 bot_app = None
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "🧠 *Encore OS Secondary Brain Online*\n\n⚡ Web Mission Control Connected.\n\nCommands:\n• */recent* - View recent voice notes\n• */stats* - View daily telemetry"
+    chat_id = update.effective_chat.id
+    save_active_chat_id(str(chat_id))
+    msg = f"🧠 *Encore OS Secondary Brain Online*\n\n✅ *Linked with Mission Control!* (Chat ID: `{chat_id}`)\n\n⚡ Features:\n• Send voice notes to get instant Groq Whisper transcription\n• Send GPS location to record live coordinates\n• Commands: `/locate`, `/status`, `/recent`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -403,7 +411,65 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• *ID #{r[0]}* ({r[2]}):\n{summary_preview}...\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    save_active_chat_id(str(chat_id))
+    
+    loc = update.message.location
+    if not loc:
+        return
+        
+    lat = loc.latitude
+    lon = loc.longitude
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO dwell_logs (location_label, latitude, longitude, accuracy_meters) VALUES (?, ?, ?, ?)",
+              ("Telegram Live Pin", lat, lon, 10.0))
+    c.execute("UPDATE telemetry SET latitude = ?, longitude = ?, location_name = 'Telegram Live Pin' WHERE id = (SELECT MAX(id) FROM telemetry)",
+              (lat, lon))
+    conn.commit()
+    conn.close()
+    
+    maps_link = f"https://www.google.com/maps?q={lat},{lon}"
+    await update.message.reply_text(
+        f"📍 *Location Indexed in Mission Control*\n\n• *Coordinates*: `{lat:.5f}, {lon:.5f}`\n• [Open in Google Maps]({maps_link})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    save_active_chat_id(str(chat_id))
+    
+    text = update.message.text or ""
+    
+    # Check if user sent coordinates like "28.6139, 77.2090"
+    coord_match = re.search(r'(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)', text)
+    if coord_match:
+        lat = float(coord_match.group(1))
+        lon = float(coord_match.group(2))
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO dwell_logs (location_label, latitude, longitude, accuracy_meters) VALUES ('Telegram Text Coords', ?, ?, 15.0)", (lat, lon))
+        c.execute("UPDATE telemetry SET latitude = ?, longitude = ? WHERE id = (SELECT MAX(id) FROM telemetry)", (lat, lon))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"📍 Extracted coordinates: `{lat:.5f}, {lon:.5f}` $\\rightarrow$ Synced to Mission Control Database!")
+        return
+
+    # Store text note in clipboard table
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO clipboard (content, content_type, category) VALUES (?, 'text', 'TELEGRAM_NOTE')", (text,))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("📋 Note saved to Secondary Brain database.", parse_mode="Markdown")
+
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    save_active_chat_id(str(chat_id))
+    
     message = update.message
     audio_file = message.audio or message.voice or message.document
     if not audio_file:
@@ -451,7 +517,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ai_summary = completion.choices[0].message.content
                 break
             except Exception as err:
-                logger.warning(f"Key attempt {attempt+1} failed for completion: {err}")
+                logger.warning(f"Key attempt {attempt+1} failed: {err}")
         if not ai_summary:
             ai_summary = "Summary unavailable. Full transcript indexed below."
         conn = sqlite3.connect(DB_PATH)
@@ -474,11 +540,13 @@ async def run_bot():
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("recent", recent_command))
+    bot_app.add_handler(MessageHandler(filters.LOCATION, handle_location_message))
     bot_app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_audio))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Telegram Bot polling started successfully.")
+    logger.info("Telegram Bot polling started with auto-chat linking and location parser.")
 
 @app.on_event("startup")
 async def startup_event():
