@@ -477,12 +477,111 @@ async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_
         disable_web_page_preview=True
     )
 
+def process_jarvis_react_intent(prompt: str) -> Dict[str, Any]:
+    """Uses Groq / LLM to analyze natural language queries and determine required hardware / secondary brain tools."""
+    client = get_groq_client()
+    if not client:
+        return {
+            "thought": "No Groq client available, treating as note.",
+            "tools": ["save_note"],
+            "chat_response": f"📋 Saved note to Secondary Brain: {prompt}",
+            "dispatches": []
+        }
+
+    system_instructions = (
+        "You are JARVIS, an autonomous personal AI assistant and device orchestrator connected to an Android phone and Secondary Brain 2.0.\n"
+        "Analyze the user's message and select the exact tool actions to perform.\n\n"
+        "Available Tool Actions:\n"
+        "- 'siren': Emergency locator alarm & flashlight strobe (for finding lost phone / alert)\n"
+        "- 'photo_front': Capture selfie / front camera photo\n"
+        "- 'photo_back': Capture environment / rear camera photo\n"
+        "- 'locate': Acquire GPS coordinates & Google Maps beacon\n"
+        "- 'status': Telemetry check (battery %, temperature, wifi)\n"
+        "- 'mute': Force 0% volume silent mode\n"
+        "- 'torch_on': Turn on phone flashlight\n"
+        "- 'torch_off': Turn off phone flashlight\n"
+        "- 'speak': Speak text out loud via phone speaker\n"
+        "- 'summary': Daily voice notes & academic task recap\n"
+        "- 'save_note': Save text as a permanent note/task\n"
+        "- 'chat': General conversation or advice\n\n"
+        "Respond ONLY with valid JSON in this exact structure:\n"
+        "{\n"
+        '  "thought": "Brief reasoning",\n'
+        '  "tools": ["tool_name_1", "tool_name_2"],\n'
+        '  "dispatches": ["/command1", "/command2"],\n'
+        '  "chat_response": "JARVIS response to user in markdown"\n'
+        "}"
+    )
+
+    for attempt in range(len(GROQ_KEYS) or 1):
+        try:
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                max_tokens=500
+            )
+            raw = completion.choices[0].message.content
+            return json.loads(raw)
+        except Exception as e:
+            logger.warning(f"JARVIS ReAct evaluation attempt failed: {e}")
+
+    # Fallback if AI fails
+    return {
+        "thought": "Direct fallback",
+        "tools": ["save_note"],
+        "dispatches": [],
+        "chat_response": f"📋 Saved to Secondary Brain: {prompt}"
+    }
+
+class JarvisChatRequest(BaseModel):
+    message: str
+    chat_id: Optional[str] = None
+
+@app.post("/api/jarvis/chat")
+async def jarvis_chat_endpoint(req: JarvisChatRequest):
+    """Natural Language JARVIS AI Endpoint for Web Admin & C2."""
+    prompt = req.message
+    plan = process_jarvis_react_intent(prompt)
+    
+    target_chat = req.chat_id or get_active_chat_id()
+    
+    # Execute any hardware dispatches
+    for cmd in plan.get("dispatches", []):
+        if bot_app and target_chat:
+            try:
+                await bot_app.bot.send_message(chat_id=target_chat, text=cmd)
+            except Exception as e:
+                logger.warning(f"Hardware dispatch error: {e}")
+                
+        sync_to_firestore("commands", None, {
+            "command": cmd,
+            "status": "DISPATCHED",
+            "prompt_origin": prompt,
+            "issued_at": datetime.utcnow().isoformat()
+        })
+        
+    return {
+        "success": True,
+        "data": {
+            "prompt": prompt,
+            "plan": plan,
+            "response": plan.get("chat_response", "Request processed."),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    }
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     save_active_chat_id(str(chat_id))
     
     text = update.message.text or ""
     
+    # Check for raw coordinate coordinates
     coord_match = re.search(r'(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)', text)
     if coord_match:
         lat = float(coord_match.group(1))
@@ -505,23 +604,52 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"📍 Extracted coordinates: `{lat:.5f}, {lon:.5f}` $\\rightarrow$ Synced to Firebase & Mission Control!")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO clipboard (content, content_type, category) VALUES (?, 'text', 'TELEGRAM_NOTE')", (text,))
-    conn.commit()
-    conn.close()
-    
-    sync_to_firestore("voice_notes", None, {
-        "raw_text": text,
-        "category": "NOTE",
-        "urgency": "MEDIUM",
-        "parsed_title": text[:60],
-        "completed": False,
-        "groq_transcription": text,
-        "ai_summary": text,
-        "created_at": datetime.utcnow().isoformat()
-    })
-    await update.message.reply_text("📋 Note saved to Firebase Secondary Brain database.", parse_mode="Markdown")
+    # JARVIS ReAct Intent Processor for all natural language messages
+    status_indicator = await update.message.reply_text("⚡ *JARVIS Processing...*", parse_mode="Markdown")
+    try:
+        plan = process_jarvis_react_intent(text)
+        dispatches = plan.get("dispatches", [])
+        tools = plan.get("tools", [])
+        response_text = plan.get("chat_response", "Command executed.")
+
+        # If physical device tools are required, execute them directly
+        for cmd in dispatches:
+            try:
+                # Send raw command to chat so Android Enforcer & Termux daemon instantly run it
+                await context.bot.send_message(chat_id=chat_id, text=cmd)
+            except Exception as d_err:
+                logger.warning(f"Error dispatching tool {cmd}: {d_err}")
+                
+            sync_to_firestore("commands", None, {
+                "command": cmd,
+                "status": "DISPATCHED",
+                "issued_at": datetime.utcnow().isoformat()
+            })
+
+        # If saving note is requested, save to SQLite & Firebase
+        if "save_note" in tools or not dispatches:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO clipboard (content, content_type, category) VALUES (?, 'text', 'TELEGRAM_NOTE')", (text,))
+            conn.commit()
+            conn.close()
+            
+            sync_to_firestore("voice_notes", None, {
+                "raw_text": text,
+                "category": "NOTE",
+                "urgency": "MEDIUM",
+                "parsed_title": text[:60],
+                "completed": False,
+                "groq_transcription": text,
+                "ai_summary": response_text,
+                "created_at": datetime.utcnow().isoformat()
+            })
+
+        full_reply = f"🤖 *JARVIS Response*:\n\n{response_text}"
+        await status_indicator.edit_text(full_reply, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"JARVIS text handling error: {e}")
+        await status_indicator.edit_text(f"📋 Note saved to Secondary Brain: {text}")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
