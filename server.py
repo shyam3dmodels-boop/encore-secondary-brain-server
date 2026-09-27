@@ -342,11 +342,10 @@ async def dispatch_c2_command(req: CommandRequest):
         try:
             await bot_app.bot.send_message(
                 chat_id=target_chat,
-                text=f"⚡ *Mission Control C2 Dispatch*\n\nCommand: `{cmd}`\nTimestamp: `{datetime.utcnow().strftime('%H:%M:%S UTC')}`",
-                parse_mode="Markdown"
+                text=cmd
             )
             telegram_sent = True
-            telegram_note = f"Sent to Telegram Chat ID {target_chat}"
+            telegram_note = f"Dispatched {cmd} to Telegram"
         except Exception as e:
             telegram_note = f"Telegram send error: {str(e)}"
             logger.warning(telegram_note)
