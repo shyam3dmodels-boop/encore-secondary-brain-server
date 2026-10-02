@@ -100,34 +100,100 @@ def run_termux_cmd(cmd_list: List[str], timeout: int = 15) -> Optional[str]:
             logger.error(f"Error executing {' '.join(cmd_list)}: {e}")
             return None
 
+def fetch_firestore_telemetry_doc(collection: str, doc_id: str) -> Optional[Dict[str, Any]]:
+    """Fetches real-time telemetry from Firestore REST API."""
+    if not FIREBASE_PROJECT_ID:
+        return None
+    try:
+        url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/{collection}/{doc_id}"
+        if FIREBASE_API_KEY:
+            url += f"?key={FIREBASE_API_KEY}"
+        req = urllib.request.Request(url, headers={"User-Agent": "JarvisSentinel/3.0"})
+        with urllib.request.urlopen(req, timeout=5) as res:
+            if res.status == 200:
+                raw = json.loads(res.read().decode("utf-8"))
+                fields = raw.get("fields", {})
+                out = {}
+                for k, v in fields.items():
+                    if "stringValue" in v:
+                        out[k] = v["stringValue"]
+                    elif "integerValue" in v:
+                        out[k] = int(v["integerValue"])
+                    elif "doubleValue" in v:
+                        out[k] = float(v["doubleValue"])
+                    elif "booleanValue" in v:
+                        out[k] = v["booleanValue"]
+                    elif "timestampValue" in v:
+                        out[k] = v["timestampValue"]
+                return out
+    except Exception as e:
+        logger.warning(f"Notice fetching Firestore telemetry for {collection}/{doc_id}: {e}")
+    return None
+
+def is_telemetry_stale(iso_timestamp: Optional[str], max_age_seconds: int = 300) -> bool:
+    if not iso_timestamp:
+        return True
+    try:
+        clean = iso_timestamp.replace("Z", "+00:00").split(".")[0]
+        dt = datetime.fromisoformat(clean)
+        diff = (datetime.utcnow() - dt).total_seconds()
+        return diff > max_age_seconds
+    except Exception:
+        return False
+
     # Desktop Simulation Layer (Active when running on Windows/macOS/Cloud)
     cmd = cmd_list[0]
-    logger.info(f"[DESKTOP SIMULATOR] Mock Termux Exec: {' '.join(cmd_list)}")
+    logger.info(f"[DESKTOP / CLOUD SIMULATOR] Termux Exec: {' '.join(cmd_list)}")
     if cmd == "termux-battery-status":
+        doc = fetch_firestore_telemetry_doc("telemetry", "current")
+        if doc:
+            stale = is_telemetry_stale(doc.get("last_updated"))
+            return json.dumps({
+                "health": "GOOD",
+                "percentage": int(doc.get("battery_level", 0)),
+                "plugged": "PLUGGED_AC" if doc.get("battery_charging") else "UNPLUGGED",
+                "status": "CHARGING" if doc.get("battery_charging") else "DISCHARGING",
+                "temperature": float(doc.get("battery_temp_celsius", 0.0)),
+                "is_online": not stale,
+                "stale_since": doc.get("last_updated") if stale else None
+            })
         return json.dumps({
-            "health": "GOOD",
-            "percentage": 88,
-            "plugged": "UNPLUGGED",
-            "status": "DISCHARGING",
-            "temperature": 31.5,
-            "current": -240
+            "error": "No live battery telemetry received from Android node yet",
+            "percentage": 0,
+            "is_online": False
         })
     elif cmd == "termux-location":
+        doc = fetch_firestore_telemetry_doc("locations", "latest")
+        if doc:
+            stale = is_telemetry_stale(doc.get("timestamp"))
+            return json.dumps({
+                "latitude": float(doc.get("latitude", 0.0)),
+                "longitude": float(doc.get("longitude", 0.0)),
+                "accuracy": float(doc.get("accuracy_meters", 10.0)),
+                "provider": str(doc.get("location_label", "gps")),
+                "speed": 0.0,
+                "is_online": not stale,
+                "timestamp": doc.get("timestamp")
+            })
         return json.dumps({
-            "latitude": 28.6139,
-            "longitude": 77.2090,
-            "altitude": 215.0,
-            "accuracy": 8.5,
-            "provider": "gps",
-            "speed": 0.0
+            "error": "No live GPS fix available from Android node",
+            "is_online": False
         })
     elif cmd == "termux-wifi-connectioninfo":
+        doc = fetch_firestore_telemetry_doc("telemetry", "current")
+        if doc:
+            stale = is_telemetry_stale(doc.get("last_updated"))
+            return json.dumps({
+                "ssid": str(doc.get("wifi_ssid", "Unknown")),
+                "bssid": str(doc.get("wifi_bssid", "00:00:00:00:00:00")),
+                "network_type": str(doc.get("network_type", "WIFI")),
+                "rssi": int(doc.get("signal_strength_dbm", -55)),
+                "is_online": not stale
+            })
         return json.dumps({
-            "ssid": "HomeNet_5G",
-            "bssid": "C4:EA:1D:9A:88:2F",
-            "ip": "192.168.1.105",
-            "link_speed_mbps": 866,
-            "rssi": -52
+            "ssid": "Offline",
+            "bssid": "00:00:00:00:00:00",
+            "is_online": False
         })
     elif cmd == "termux-toast":
         return f"[Simulated Toast] {cmd_list[1] if len(cmd_list) > 1 else ''}"
@@ -190,12 +256,24 @@ def get_battery_info() -> Dict[str, Any]:
             return json.loads(output)
         except Exception:
             pass
+    # If termux-api not available, pull directly from Firestore
+    doc = fetch_firestore_telemetry_doc("telemetry", "current")
+    if doc:
+        return {
+            "percentage": int(doc.get("battery_level", 0)),
+            "health": "GOOD",
+            "temperature": float(doc.get("battery_temp_celsius", 0.0)),
+            "status": "CHARGING" if doc.get("battery_charging") else "DISCHARGING",
+            "plugged": "PLUGGED_AC" if doc.get("battery_charging") else "UNPLUGGED",
+            "is_online": not is_telemetry_stale(doc.get("last_updated"))
+        }
     return {
-        "percentage": 85,
-        "health": "GOOD",
-        "temperature": 31.8,
-        "status": "DISCHARGING",
-        "plugged": "UNPLUGGED"
+        "percentage": 0,
+        "health": "OFFLINE",
+        "temperature": 0.0,
+        "status": "UNKNOWN",
+        "plugged": "UNKNOWN",
+        "is_online": False
     }
 
 def get_location_gps() -> Dict[str, Any]:
@@ -204,43 +282,58 @@ def get_location_gps() -> Dict[str, Any]:
     if output:
         try:
             data = json.loads(output)
-            lat = data.get("latitude", 28.6139)
-            lon = data.get("longitude", 77.2090)
-            return {
-                "latitude": lat,
-                "longitude": lon,
-                "accuracy": data.get("accuracy", 8.5),
-                "altitude": data.get("altitude", 215.0),
-                "speed": data.get("speed", 0.0),
-                "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}"
-            }
+            lat = data.get("latitude")
+            lon = data.get("longitude")
+            if lat is not None and lon is not None:
+                return {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "accuracy": data.get("accuracy", 8.5),
+                    "altitude": data.get("altitude", 215.0),
+                    "speed": data.get("speed", 0.0),
+                    "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}"
+                }
         except Exception:
             pass
+    # Pull real location from Firestore locations/latest
+    doc = fetch_firestore_telemetry_doc("locations", "latest")
+    if doc and doc.get("latitude") and doc.get("longitude"):
+        lat = doc["latitude"]
+        lon = doc["longitude"]
+        return {
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy": doc.get("accuracy_meters", 10.0),
+            "altitude": 0.0,
+            "speed": 0.0,
+            "google_maps_url": f"https://www.google.com/maps?q={lat},{lon}"
+        }
     return {
-        "latitude": 28.6139,
-        "longitude": 77.2090,
-        "accuracy": 8.5,
-        "altitude": 215.0,
+        "latitude": None,
+        "longitude": None,
+        "accuracy": None,
+        "altitude": 0.0,
         "speed": 0.0,
-        "google_maps_url": "https://www.google.com/maps?q=28.6139,77.2090"
+        "google_maps_url": None,
+        "error": "No GPS fix available"
     }
 
-def take_camera_photo(front: bool = False, output_path: str = "/sdcard/jarvis_snap.jpg") -> Optional[str]:
-    """Takes a snapshot and saves to local storage."""
+def take_camera_photo(front: bool = False, output_path: Optional[str] = None) -> Optional[str]:
+    """Takes a snapshot and saves to private internal app storage."""
     camera_id = "1" if front else "0"
+    if not output_path:
+        # Save to private internal Termux cache/tmp directory per GDPR data minimization
+        tmp_dir = "/data/data/com.termux/files/usr/tmp" if IS_TERMUX else os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        output_path = os.path.join(tmp_dir, f"jarvis_snap_{int(time.time())}.jpg")
+
     logger.info(f"📸 Capturing photo (Camera ID: {camera_id})...")
     if IS_TERMUX:
         run_termux_cmd(["termux-camera-photo", "-c", camera_id, output_path], timeout=15)
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return output_path
     else:
-        # Simulate creating an empty photo file on desktop for testing
-        try:
-            with open(output_path, "wb") as f:
-                f.write(b"MOCK_PHOTO_DATA_DESKTOP")
-            return output_path
-        except Exception:
-            pass
+        logger.warning("Camera hardware capture requested on non-Termux node; physical camera only available on Android.")
     return None
 
 def set_volume_override(stream: str, volume: int):
@@ -539,24 +632,32 @@ def execute_jarvis_action(cmd_string: str) -> str:
 
     elif cmd.startswith("/photo") or "photo" in cmd.lower() or "snap" in cmd.lower():
         is_front = "front" in cmd.lower() or "selfie" in cmd.lower()
-        snap_path = "/sdcard/jarvis_snap.jpg" if IS_TERMUX else "jarvis_snap.jpg"
-        photo = take_camera_photo(front=is_front, output_path=snap_path)
+        photo = take_camera_photo(front=is_front)
         facing = "Front (Selfie)" if is_front else "Rear (Main)"
         if photo and os.path.exists(photo):
             send_telegram_photo(photo, f"📸 *JARVIS Camera Snapshot*\n• Facing: {facing}\n• Timestamp: {datetime.utcnow().strftime('%H:%M:%S UTC')}")
-            return f"📸 *[SNAPSHOT CAPTURED]*\nDelivered {facing} camera frame to Telegram."
+            # GDPR Data Minimization: Wipe temporary snapshot immediately after transmission
+            try:
+                os.remove(photo)
+                logger.info(f"GDPR Data Minimization: securely wiped temporary snapshot {photo}")
+            except Exception as e:
+                logger.warning(f"Notice wiping photo: {e}")
+            return f"📸 *[SNAPSHOT CAPTURED]*\nDelivered {facing} camera frame to Telegram. (Local snapshot wiped per GDPR data minimization)."
         else:
-            return f"📸 Snapshot attempted ({facing} camera). Check permissions."
+            return f"⚠️ Camera snapshot unavailable ({facing} camera). Ensure camera permissions are granted on the physical Android node."
 
     elif cmd.startswith("/locate") or "locate" in cmd.lower() or "gps" in cmd.lower():
         loc = get_location_gps()
-        sync_to_firestore("locations", "latest", loc)
-        return (
-            f"📍 *[JARVIS GPS BEACON]*\n"
-            f"• Coordinates: `{loc['latitude']:.5f}, {loc['longitude']:.5f}`\n"
-            f"• Accuracy: ±{loc['accuracy']}m\n"
-            f"• [Open in Google Maps]({loc['google_maps_url']})"
-        )
+        if loc.get("latitude") is not None and loc.get("longitude") is not None:
+            sync_to_firestore("locations", "latest", loc)
+            return (
+                f"📍 *[JARVIS GPS BEACON]*\n"
+                f"• Coordinates: `{loc['latitude']:.5f}, {loc['longitude']:.5f}`\n"
+                f"• Accuracy: ±{loc.get('accuracy', 10.0)}m\n"
+                f"• [Open in Google Maps]({loc['google_maps_url']})"
+            )
+        else:
+            return "⚠️ *[GPS UNAVAILABLE]*\nNo active satellite fix received from Android node. Please open Remix Enforcer OS to acquire GPS fix."
 
     elif cmd.startswith("/status") or "status" in cmd.lower():
         batt = get_battery_info()

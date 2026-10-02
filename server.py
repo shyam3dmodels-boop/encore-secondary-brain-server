@@ -273,7 +273,6 @@ app.add_middleware(
         "https://encore-secondary-brain-server.onrender.com",
         "https://secondary-brain-admin.vercel.app",
         "https://remix-enforcer.web.app",
-        "*",  # Keep for Android native HTTP clients
     ],
     allow_credentials=True,
     allow_methods=["*"],
