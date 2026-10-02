@@ -498,6 +498,21 @@ def init_db():
 
 init_db()
 
+AUTHORIZED_TELEGRAM_CHATS = set(
+    [c.strip() for c in (os.environ.get("TELEGRAM_CHAT_ID") or "-1004445314496").split(",") if c.strip()]
+)
+
+def is_telegram_chat_authorized(chat_id: Any) -> bool:
+    cid = str(chat_id).strip()
+    if not cid:
+        return False
+    if cid in AUTHORIZED_TELEGRAM_CHATS:
+        return True
+    active = str(get_active_chat_id() or "").strip()
+    if active and cid == active:
+        return True
+    return False
+
 def get_active_chat_id():
     global TELEGRAM_CHAT_ID
     if TELEGRAM_CHAT_ID:
@@ -511,6 +526,9 @@ def get_active_chat_id():
 
 def save_active_chat_id(chat_id: str):
     global TELEGRAM_CHAT_ID
+    if not is_telegram_chat_authorized(chat_id):
+        logger.warning(f"Rejected save_active_chat_id for unauthorized chat: {chat_id}")
+        return
     TELEGRAM_CHAT_ID = str(chat_id)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -2018,8 +2036,46 @@ def get_db_table(table_name: str, page: int = Query(0), page_size: int = Query(2
 # ─── Telegram Bot Logic ───────────────────────────────────────────────────────
 bot_app = None
 
+def require_telegram_auth(handler_func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+        if not is_telegram_chat_authorized(chat_id):
+            logger.warning(f"⛔ Blocked unauthorized Telegram bot command from chat_id={chat_id}")
+            if update.message:
+                await update.message.reply_text(
+                    f"⛔ *[ACCESS DENIED]*\nYour Chat ID (`{chat_id}`) is not authorized to control Secondary Brain hardware.",
+                    parse_mode="Markdown"
+                )
+            primary_chat = list(AUTHORIZED_TELEGRAM_CHATS)[0] if AUTHORIZED_TELEGRAM_CHATS else None
+            if primary_chat and str(primary_chat) != str(chat_id) and bot_app:
+                try:
+                    cmd_text = update.message.text if update.message else "Unknown"
+                    await bot_app.bot.send_message(
+                        chat_id=primary_chat,
+                        text=f"🚨 *[SECURITY ALERT]* Unauthorized C2 attempt `{cmd_text}` from Chat ID `{chat_id}` blocked.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+            return
+        return await handler_func(update, context)
+    return wrapper
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if not is_telegram_chat_authorized(chat_id):
+        msg = (
+            f"🤖 *[ENFORCER OS — AUTHENTICATION REQUIRED]*\n\n"
+            f"• Your Chat ID: `{chat_id}`\n"
+            f"• Status: ⛔ *Unauthorized / Unpaired*\n\n"
+            f"This bot is locked to an authorized commander. "
+            f"To authorize commands from this chat, register Chat ID `{chat_id}` in your Mission Control configuration."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
     save_active_chat_id(str(chat_id))
     msg = f"🧠 *Encore OS Secondary Brain Online*\n\n🔥 *Direct Firebase Sync Active!* (`{FIREBASE_PROJECT_ID}`)\n✅ *Linked with Mission Control!* (Chat ID: `{chat_id}`)\n\n⚡ Features:\n• Send voice notes $\\rightarrow$ instant Groq Whisper transcription $\\rightarrow$ saved to Firebase\n• Send GPS location $\\rightarrow$ instant map pin in Web Mission Control\n• Commands: `/locate`, `/status`, `/recent`"
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -3598,34 +3654,34 @@ async def run_bot():
         return
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_command))
-    bot_app.add_handler(CommandHandler("recent", recent_command))
-    bot_app.add_handler(CommandHandler("status", status_command))
-    bot_app.add_handler(CommandHandler("locate", locate_command))
-    bot_app.add_handler(CommandHandler("gps", locate_command))
-    bot_app.add_handler(CommandHandler("siren", siren_command))
-    bot_app.add_handler(CommandHandler("photo", photo_command))
-    bot_app.add_handler(CommandHandler("snap", photo_command))
-    bot_app.add_handler(CommandHandler("mute", mute_command))
-    bot_app.add_handler(CommandHandler("app", app_command))
-    bot_app.add_handler(CommandHandler("open", app_command))
-    bot_app.add_handler(CommandHandler("play", play_command))
-    bot_app.add_handler(CommandHandler("arp", arp_command))
-    bot_app.add_handler(CommandHandler("netscan", netscan_command))
-    bot_app.add_handler(CommandHandler("fingerprint", fingerprint_command))
-    bot_app.add_handler(CommandHandler("memory", memory_command))
+    bot_app.add_handler(CommandHandler("recent", require_telegram_auth(recent_command)))
+    bot_app.add_handler(CommandHandler("status", require_telegram_auth(status_command)))
+    bot_app.add_handler(CommandHandler("locate", require_telegram_auth(locate_command)))
+    bot_app.add_handler(CommandHandler("gps", require_telegram_auth(locate_command)))
+    bot_app.add_handler(CommandHandler("siren", require_telegram_auth(siren_command)))
+    bot_app.add_handler(CommandHandler("photo", require_telegram_auth(photo_command)))
+    bot_app.add_handler(CommandHandler("snap", require_telegram_auth(photo_command)))
+    bot_app.add_handler(CommandHandler("mute", require_telegram_auth(mute_command)))
+    bot_app.add_handler(CommandHandler("app", require_telegram_auth(app_command)))
+    bot_app.add_handler(CommandHandler("open", require_telegram_auth(app_command)))
+    bot_app.add_handler(CommandHandler("play", require_telegram_auth(play_command)))
+    bot_app.add_handler(CommandHandler("arp", require_telegram_auth(arp_command)))
+    bot_app.add_handler(CommandHandler("netscan", require_telegram_auth(netscan_command)))
+    bot_app.add_handler(CommandHandler("fingerprint", require_telegram_auth(fingerprint_command)))
+    bot_app.add_handler(CommandHandler("memory", require_telegram_auth(memory_command)))
     
     # 🌟 Interactive AI Conversation Mode Commands
-    bot_app.add_handler(CommandHandler("ai", ai_command))
-    bot_app.add_handler(CommandHandler("models", ai_command))
-    bot_app.add_handler(CommandHandler("llms", ai_command))
-    bot_app.add_handler(CommandHandler("stop", stop_command))
-    bot_app.add_handler(CommandHandler("stopai", stop_command))
-    bot_app.add_handler(CommandHandler("exit", stop_command))
-    bot_app.add_handler(CommandHandler("setkey", setkey_command))
+    bot_app.add_handler(CommandHandler("ai", require_telegram_auth(ai_command)))
+    bot_app.add_handler(CommandHandler("models", require_telegram_auth(ai_command)))
+    bot_app.add_handler(CommandHandler("llms", require_telegram_auth(ai_command)))
+    bot_app.add_handler(CommandHandler("stop", require_telegram_auth(stop_command)))
+    bot_app.add_handler(CommandHandler("stopai", require_telegram_auth(stop_command)))
+    bot_app.add_handler(CommandHandler("exit", require_telegram_auth(stop_command)))
+    bot_app.add_handler(CommandHandler("setkey", require_telegram_auth(setkey_command)))
     
-    bot_app.add_handler(MessageHandler(filters.LOCATION, handle_location_message))
-    bot_app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_audio))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    bot_app.add_handler(MessageHandler(filters.LOCATION, require_telegram_auth(handle_location_message)))
+    bot_app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, require_telegram_auth(handle_audio)))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, require_telegram_auth(handle_text_message)))
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
