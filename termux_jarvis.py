@@ -42,11 +42,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("JarvisTermux")
 
+# Auto-load .env file if present
+def load_dotenv_if_exists(filepath=None):
+    if filepath is None:
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception as e:
+            logger.warning(f"Notice loading .env file: {e}")
+
+load_dotenv_if_exists()
+
 # ─── Configuration ────────────────────────────────────────────────────────────
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID") or "android-1a887"
-FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY") or "AIzaSyCTUzJhx7yuMv35XWXlSFW3MhQtG_-GT3w"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "8942980083:AAHmhVY4ybuOYSSJDsyuF8Z-1DP66WEbl5k"
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "-1004445314496"
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 IS_TERMUX = bool(shutil.which("termux-battery-status") or os.path.exists("/data/data/com.termux"))
 
 # Try importing offline needle LLM if available locally

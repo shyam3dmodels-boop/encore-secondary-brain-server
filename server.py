@@ -51,14 +51,43 @@ def get_db_connection(database=None, **kwargs) -> sqlite3.Connection:
 # Monkey-patch sqlite3.connect across entire server to eliminate database locked errors
 sqlite3.connect = get_db_connection
 
+# Auto-load .env file if present in server directory (does not override active environment)
+def load_dotenv_if_exists(filepath=None):
+    if filepath is None:
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception as e:
+            logger.warning(f"Notice loading .env file: {e}")
+
+load_dotenv_if_exists()
+
 raw_keys = os.environ.get("GROQ_API_KEYS") or os.environ.get("GROQ_API_KEY") or ""
 GROQ_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "8942980083:AAHmhVY4ybuOYSSJDsyuF8Z-1DP66WEbl5k"
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN") or "HarshBrainSecretKey2026!#"
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "-1004445314496"
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID") or "android-1a887"
-FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY") or "AIzaSyCTUzJhx7yuMv35XWXlSFW3MhQtG_-GT3w"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "").strip()
+
+# Startup security verification
+if not ADMIN_TOKEN:
+    logger.warning("⚠️ SECURITY WARNING: ADMIN_TOKEN is not configured! Protected REST endpoints will require an admin key.")
+if not TELEGRAM_BOT_TOKEN:
+    logger.warning("⚠️ TELEGRAM_BOT_TOKEN is not configured. Telegram bot service will be inactive.")
+if not FIREBASE_API_KEY:
+    logger.warning("⚠️ FIREBASE_API_KEY is not configured. Cloud Firestore sync will be skipped.")
 
 # Active AI Chat Sessions per Telegram Chat ID: { chat_id: { "model": str, "active": bool, "history": list } }
 ACTIVE_AI_SESSIONS: Dict[int, Dict[str, Any]] = {}
