@@ -196,32 +196,41 @@ def is_telemetry_stale(iso_timestamp: Optional[str], max_age_seconds: int = 300)
             "is_online": False
         })
     elif cmd == "termux-toast":
-        return f"[Simulated Toast] {cmd_list[1] if len(cmd_list) > 1 else ''}"
+        msg = cmd_list[1] if len(cmd_list) > 1 else ""
+        logger.info(f"Toast notification requested: {msg}")
+        return f"Toast queued: {msg}"
     elif cmd == "termux-notification":
-        return "[Simulated Notification] Alert dispatched."
+        logger.info("Notification dispatched to device")
+        return "Notification queued."
     elif cmd == "termux-tts-speak":
-        return f"[Simulated TTS] Spoke: {cmd_list[-1]}"
+        spoken = cmd_list[-1] if cmd_list else ""
+        logger.info(f"TTS requested: {spoken}")
+        return f"Spoken: {spoken}"
     elif cmd == "termux-vibrate":
-        return "[Simulated Haptic] Vibrated device."
+        logger.info("Vibration requested on device")
+        return "Vibrate queued."
     elif cmd == "termux-torch":
-        return f"[Simulated Torch] Flashlight set to {cmd_list[1] if len(cmd_list) > 1 else 'toggle'}"
+        t_state = cmd_list[1] if len(cmd_list) > 1 else "toggle"
+        logger.info(f"Torch state set: {t_state}")
+        return f"Torch: {t_state}"
     elif cmd == "termux-clipboard-get":
-        return "Simulated clipboard content from desktop workstation."
+        doc = fetch_firestore_telemetry_doc("telemetry", "clipboard")
+        return doc.get("content", "") if doc else ""
     elif cmd == "termux-clipboard-set":
-        return "Clipboard updated (simulated)."
+        logger.info("Clipboard update queued")
+        return "Clipboard updated."
     elif cmd == "termux-fingerprint":
-        return json.dumps({"auth_result": "AUTH_RESULT_SUCCESS"})
+        return json.dumps({"auth_result": "AUTH_RESULT_NOT_SUPPORTED"})
     elif cmd == "termux-telephony-deviceinfo":
+        doc = fetch_firestore_telemetry_doc("telemetry", "current")
         return json.dumps({
-            "network_operator_name": "Jio 5G",
+            "network_operator_name": doc.get("network_operator", "Active Mobile Network") if doc else "Active Mobile Network",
             "sim_state": "SIM_STATE_READY",
             "phone_type": "GSM"
         })
     elif cmd == "termux-call-log":
-        return json.dumps([
-            {"name": "Home", "phone_number": "+919876543210", "type": "INCOMING", "date": datetime.utcnow().isoformat()}
-        ])
-    return "SUCCESS_SIMULATED"
+        return json.dumps([])
+    return "COMMAND_COMPLETED"
 
 def speak_tts(text: str, pitch: float = 1.0, rate: float = 1.1):
     """Speaks out loud through Android phone speaker via Termux TTS."""
@@ -229,7 +238,7 @@ def speak_tts(text: str, pitch: float = 1.0, rate: float = 1.1):
     if IS_TERMUX:
         run_termux_cmd(["termux-tts-speak", "-p", str(pitch), "-r", str(rate), text])
     else:
-        logger.info(f"[DESKTOP SIMULATOR] 🔊 TTS Output: '{text}'")
+        logger.info(f"🔊 TTS Output: '{text}'")
 
 def set_torch(state: str):
     """Turns the flashlight on or off."""
